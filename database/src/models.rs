@@ -4,16 +4,17 @@
 //! The ordering must match that in the generated schema, which
 //! you can obtain with `diesel print-schema`.
 
-use std::borrow::Cow;
+use super::Connection;
+use super::schema::{accounts, follows, statuses, users};
 use chrono::DateTime;
 use chrono::offset::Utc;
+use chrono_humanize::Humanize;
 use diesel;
 use diesel::prelude::*;
 use pwhash::bcrypt;
 use rocket::outcome::IntoOutcome;
 use rocket::request::{self, FromRequest, Request};
-use super::schema::{accounts, follows, statuses, users};
-use super::Connection;
+use std::borrow::Cow;
 use {BASE_URL, DOMAIN};
 
 /// Represents an account (local _or_ remote) on the network, storing federation-relevant information.
@@ -40,7 +41,7 @@ pub struct User {
     pub email: String,
     pub encrypted_password: String,
 
-    account_id: i64,
+    pub account_id: i64,
 }
 
 /// Represents a post.
@@ -67,6 +68,7 @@ pub struct Follow {
     pub target_id: i64,
 }
 
+/// Represents a new user for insertion into the database.
 #[derive(Insertable, Debug)]
 #[table_name = "users"]
 pub struct NewUser {
@@ -76,14 +78,7 @@ pub struct NewUser {
     pub account_id: i64,
 }
 
-impl NewUser {
-    pub fn insert(self, conn: &Connection) -> QueryResult<User> {
-        use super::schema::users::dsl::*;
-
-        diesel::insert_into(users).values(&self).get_result(&**conn)
-    }
-}
-
+/// Represents a new account for insertion into the database.
 #[derive(Insertable, Debug)]
 #[table_name = "accounts"]
 pub struct NewAccount {
@@ -96,11 +91,39 @@ pub struct NewAccount {
     pub summary: Option<String>,
 }
 
+/// Represents a new status for insertion into the database.
+#[derive(Insertable, Debug)]
+#[table_name = "statuses"]
+pub struct NewStatus {
+    pub text: String,
+    pub content_warning: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub account_id: i64,
+}
+
+impl NewUser {
+    pub fn insert(self, conn: &Connection) -> QueryResult<User> {
+        use super::schema::users::dsl::*;
+
+        diesel::insert_into(users).values(&self).get_result(&**conn)
+    }
+}
+
 impl NewAccount {
     pub fn insert(self, conn: &Connection) -> QueryResult<Account> {
         use super::schema::accounts::dsl::*;
 
         diesel::insert_into(accounts)
+            .values(&self)
+            .get_result(&**conn)
+    }
+}
+
+impl NewStatus {
+    pub fn insert(self, conn: &Connection) -> QueryResult<Status> {
+        use super::schema::statuses::dsl::*;
+
+        diesel::insert_into(statuses)
             .values(&self)
             .get_result(&**conn)
     }
@@ -115,7 +138,7 @@ impl User {
         bcrypt::verify(password.as_ref(), &self.encrypted_password)
     }
 
-    /// Hashes a plaintext password for storage in the database.
+    /// Returns the hash of a plaintext password, for storage in the database.
     pub fn encrypt_password<S>(password: S) -> String
     where
         S: AsRef<str>,
@@ -123,6 +146,7 @@ impl User {
         bcrypt::hash(password.as_ref()).expect("Couldn't hash password!")
     }
 
+    /// Finds a local user by their username, returning an `Option<User>`.
     pub fn by_username<S>(db_conn: &Connection, username: S) -> QueryResult<Option<User>>
     where
         S: AsRef<str>,
@@ -143,10 +167,26 @@ impl User {
             .optional()
     }
 
+    /// Finds a local user by their ID, returning an `Option<User>`.
     pub fn by_id(db_conn: &Connection, uid: i64) -> QueryResult<Option<User>> {
         use super::schema::users::dsl::*;
 
         users.find(uid).first(&**db_conn).optional()
+    }
+
+    /// Returns the corresponding `Account` of a local user.
+    ///
+    /// Note: panics if the account does not exist. This _will_ be caught by
+    /// Rocket, but this _should be_ an irrecoverable error - there's no concievable
+    /// circumstance outside of horrible database meddling that would cause this.
+    pub fn get_account(self, db_conn: &Connection) -> QueryResult<Account> {
+        use super::schema::accounts::dsl::*;
+
+        accounts
+            .find(self.account_id)
+            .first(&**db_conn)
+            .optional()
+            .map(|x| x.expect("All users should have an account!"))
     }
 }
 
@@ -174,6 +214,7 @@ impl<'a, 'r> FromRequest<'a, 'r> for User {
 }
 
 impl Account {
+    /// Finds a local account by username, returning an `Option<Account>`.
     pub fn fetch_local_by_username<S>(
         db_conn: &Connection,
         username: S,
@@ -189,6 +230,7 @@ impl Account {
             .optional()
     }
 
+    /// Returns the fully-qualified (`@user@domain`) username of an account.
     pub fn fully_qualified_username(&self) -> String {
         format!(
             "@{user}@{domain}",
@@ -197,6 +239,7 @@ impl Account {
         )
     }
 
+    /// Returns the domain on which an account resides.
     pub fn get_domain(&self) -> &str {
         self.domain
             .as_ref()
@@ -204,6 +247,7 @@ impl Account {
             .unwrap_or_else(|| DOMAIN.as_str())
     }
 
+    /// Returns the URI of the account's ActivityPub object.
     pub fn get_uri<'a>(&'a self) -> Cow<'a, str> {
         self.uri
             .as_ref()
@@ -217,6 +261,7 @@ impl Account {
             })
     }
 
+    /// Returns the URI of the ActivityPub `inbox` endpoint for this account.
     pub fn get_inbox_endpoint<'a>(&'a self) -> Cow<'a, str> {
         self.uri
             .as_ref()
@@ -230,6 +275,7 @@ impl Account {
             })
     }
 
+    /// Returns the URI of the ActivityPub `outbox` endpoint for this account.
     pub fn get_outbox_endpoint<'a>(&'a self) -> Cow<'a, str> {
         self.uri
             .as_ref()
@@ -243,6 +289,7 @@ impl Account {
             })
     }
 
+    /// Returns the URI of the ActivityPub `following` endpoint for this account.
     pub fn get_following_endpoint<'a>(&'a self) -> Cow<'a, str> {
         self.uri
             .as_ref()
@@ -256,6 +303,7 @@ impl Account {
             })
     }
 
+    /// Returns the URI of the ActivityPub `followers` endpoint for this account.
     pub fn get_followers_endpoint<'a>(&'a self) -> Cow<'a, str> {
         self.uri
             .as_ref()
@@ -268,31 +316,90 @@ impl Account {
                 ).into()
             })
     }
+
+    /// Returns `n` statuses authored by this account, authored
+    // _strictly before_ the status `max_id`.
+    pub fn statuses_before_id(
+        &self,
+        db_conn: &Connection,
+        max_id: Option<i64>,
+        n: usize,
+    ) -> QueryResult<Vec<Status>> {
+        use super::schema::statuses::dsl::*;
+        let mut query = statuses.filter(account_id.eq(self.id)).into_boxed();
+
+        if let Some(max_id) = max_id {
+            query = query.filter(id.lt(max_id))
+        }
+
+        query
+            .order(id.desc())
+            .limit(n as i64)
+            .get_results::<Status>(&**db_conn)
+    }
+
+    /// Returns a tuple of upper and lower bounds on the IDs of statuses authored by this account
+    /// (i.e., `min(ids)` and `max(ids)` where `ids` is a list of status ids authored by this user).
+    ///
+    /// If this account has no statuses attached to it in the database, return `None`.
+    pub fn status_id_bounds(&self, db_conn: &Connection) -> QueryResult<Option<(i64, i64)>> {
+        use super::schema::statuses::dsl::*;
+        use diesel::dsl::sql;
+        // Yes, this is gross and we don't like having to use sql() either.
+        // See [diesel-rs/diesel#3](https://github.com/diesel-rs/diesel/issues/3) for why this is necessary.
+        statuses
+            .select(sql("min(id), max(id)"))
+            .filter(account_id.eq(self.id))
+            .first::<(Option<i64>, Option<i64>)>(&**db_conn)
+            .map(|result| match result {
+                (Some(x), Some(y)) => Some((x, y)),
+                _ => None,
+            })
+    }
 }
 
 impl Status {
-    pub fn account(&self, db_conn: &Connection) -> QueryResult<Option<Account>> {
+    /// Returns the `Account` which authored this status.
+    pub fn account(&self, db_conn: &Connection) -> QueryResult<Account> {
         use super::schema::accounts::dsl;
         dsl::accounts
             .find(self.account_id)
             .first::<Account>(&**db_conn)
+    }
+
+    /// Returns an optional status given an account ID and a status ID.
+    pub fn by_account_and_id(
+        db_conn: &Connection,
+        account_id: i64,
+        id: i64,
+    ) -> QueryResult<Option<Status>> {
+        use super::schema::statuses::dsl;
+        dsl::statuses
+            .find(id)
+            .filter(dsl::account_id.eq(account_id))
+            .first::<Status>(&**db_conn)
             .optional()
     }
 
-    pub fn get_uri<'a>(&'a self, db_conn: &Connection) -> QueryResult<Option<Cow<'a, str>>> {
-        Ok(Some(
-            self.uri
-                .as_ref()
-                .map(|x| String::as_str(x).into())
-                .unwrap_or(
-                    format!(
-                        "{base}/users/{user}/statuses/{id}",
-                        base = BASE_URL.as_str(),
-                        user = try_resopt!(self.account(db_conn)).username,
-                        id = self.id
-                    ).into(),
-                ),
-        ))
+    /// Returns a human-readble description of the age of this status.
+    pub fn humanized_age(&self) -> String {
+        self.created_at.humanize()
+    }
+
+    /// Retunrs a URI to the ActivityPub object of this status.
+    pub fn get_uri<'a>(&'a self, db_conn: &Connection) -> QueryResult<Cow<'a, str>> {
+        let uri = self.uri.as_ref().map(|x| String::as_str(x).into());
+        match uri {
+            Some(x) => Ok(x),
+            None => {
+                return Ok(format!(
+                    "{base}/users/{user}/statuses/{id}",
+                    base = BASE_URL.as_str(),
+                    user = self.account(db_conn)?.username,
+                    id = self.id
+                ).into())
+            },
+        }
     }
 }
 
@@ -300,6 +407,7 @@ pub mod validators {
     use regex::Regex;
 
     lazy_static! {
+        /// During registrations, usernames must be matched by this regex to be considered valid.
         pub static ref VALID_USERNAME_RE: Regex = Regex::new(r"^[[:alnum:]_]+$").unwrap();
     }
 }

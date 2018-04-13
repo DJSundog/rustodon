@@ -1,6 +1,7 @@
 #![recursion_limit = "128"]
 
 extern crate chrono;
+extern crate chrono_humanize;
 #[macro_use]
 extern crate diesel;
 #[macro_use]
@@ -15,21 +16,24 @@ extern crate regex;
 extern crate resopt;
 extern crate rocket;
 
-use std::ops::Deref;
-use std::env;
-use r2d2_diesel::ConnectionManager;
+pub use diesel::connection::Connection as DieselConnection;
 use diesel::pg::PgConnection;
+use r2d2_diesel::ConnectionManager;
+use rocket::http::Status;
 use rocket::request::{self, FromRequest};
 use rocket::{Outcome, Request, State};
-use rocket::http::Status;
-pub use diesel::connection::Connection as DieselConnection;
+use std::env;
+use std::ops::Deref;
 
-pub mod schema;
 pub mod models;
+pub mod schema;
 
 // TODO: gross hack. find a nicer way to pass these in?
 lazy_static! {
-    pub static ref BASE_URL: String = format!("https://{}", env::var("DOMAIN").expect("DOMAIN must be set"));
+    pub static ref BASE_URL: String = format!(
+        "https://{}",
+        env::var("DOMAIN").expect("DOMAIN must be set")
+    );
     pub static ref DOMAIN: String = env::var("DOMAIN").expect("DOMAIN must be set");
 }
 
